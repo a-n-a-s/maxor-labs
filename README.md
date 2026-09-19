@@ -116,40 +116,40 @@ Incorrect: 1
 Accuracy: 80%
 ```
 
-## Q&A / technical decisions
+## RAG vs CAG — and why we chose CAG
 
-**1. Why CAG instead of RAG?**
-The entire knowledge base is six markdown files: **2,961 characters ≈ 613 tokens** (verified with a real tokenizer, not an estimate). That is 0.5% of one small LLM context window. Embedding the docs, building a vector store, and running retrieval would add moving parts — and a retrieval-accuracy risk (LLM never sees the right rule if search misses) — with zero benefit at this scale. The spec's own hint permits CAG "only if it doesn't bloat the prompt context needlessly"; ~613 extra tokens per request is negligible. I also priced both approaches before deciding: at `gemini-3-flash-preview` rates, RAG ≈ $0.00098/request vs CAG ≈ $0.0011/request — a $0.00012 difference. Cost was genuinely not the deciding factor; simplicity and reliability were. A full local RAG pipeline (chunking + hashed embeddings + NumPy cosine KNN) remains in `backend/retrieval.py` for reference and future use if the corpus grows.
+**The requirement (spec section 7):** load policy docs → split into chunks → create embeddings → store locally → embed the incoming ticket → retrieve the most relevant chunks → pass retrieved context to the LLM. The spec's hint then adds: *"you might also use CAG instead of overengineering with RAG, only if it doesn't bloat the prompt context needlessly."*
 
-**2. Why CAG's prompt structure is worth the token cost**
-The prompt is a fixed prefix (policies + instructions) with only the ticket varying, so with Gemini's context caching the static prefix would read at a steep discount at scale — meaning CAG's extra input cost shrinks, not grows, with volume.
+### CAG, in one line
+Cache-Augmented Generation skips the retrieval pipeline and puts the **entire knowledge base into the prompt** on every request.
 
-**3. Why bcrypt for password hashing?**
-Passwords must never be stored as plaintext or reversible hashes. bcrypt is a deliberately slow, salted, adaptive hash — brute-force resistant (12 rounds ≈ 4-5 orders of magnitude cost factor), handles salting automatically, and needs no extra dependencies beyond `bcrypt`. I initially used PBKDF2-HMAC-SHA256 (also crypto-sound) and switched after review; both are fine, bcrypt was chosen for simplicity and industry familiarity.
+### Why we picked CAG for this project
 
-**4. Why JWT with PyJWT, HS256, and a `sub` claim?**
-JWT gives stateless authentication — the server stores no session; the token is self-verifying via HMAC-SHA256 of `header.payload` with `JWT_SECRET`. Any tampering invalidates the signature, and `exp` is checked automatically on decode. `sub` (subject) carries the user id; expiry is `JWT_EXPIRE_MINUTES` (default 60). HS256 is the right symmetric choice for a single-service app — asymmetric RS256 adds key management for no benefit here. The secret must be ≥32 random bytes (PyJWT warns below that); the code fails closed: forged/expired tokens → 401.
+**1. The corpus is tiny — 613 tokens total.**
+The 6 policy files are 2,961 characters ≈ **613 tokens** (measured with a real tokenizer, not guessed). That is ~0.5% of a small context window. There is nothing to "retrieve from": the whole KB already fits comfortably in the prompt.
 
-**5. How are authentication and authorization separated?**
-Authentication (who are you?) happens in `auth.get_current_user`: `HTTPBearer()` extracts the token, `decode_access_token` verifies the signature + expiry and returns the user id, then the DB row is fetched. This is wired into routes via FastAPI dependency injection (`Depends(get_current_user)`), so handlers can't forget auth. Authorization (can you touch *this* resource?) is enforced per-query in `api.py`: every ticket lookup filters `WHERE user_id = ?`, so a valid Alice token still gets 404 on Bob's ticket. This is exactly the split the spec tests.
+**2. RAG adds real risk, not just complexity.**
+Retrieval introduces a new failure mode: if search returns the *wrong* chunks, the LLM never sees the applicable rule and invents an answer. For a 6-document knowledge base, that risk far outweighs the pipeline's benefits.
 
-**6. Why SQLite with raw `sqlite3`, not SQLAlchemy or Postgres?**
-The schema is three small tables. SQLAlchemy would add an ORM layer to justify; Postgres adds a server to run. SQLite is a zero-ops embedded database that satisfies the assignment (and is in the spec's required list). Raw `sqlite3` keeps the code transparent. One design note: a fresh connection is opened per operation (row factory + `PRAGMA foreign_keys = ON`) because SQLite connections are not thread-safe and FastAPI serves requests concurrently.
+**3. The cost difference is negligible (and we verified it).**
+Priced on `gemini-3-flash-preview` before deciding:
 
-**7. Why no LangChain / LlamaIndex / FAISS / Chroma / hosted vector DB?**
-All overkill for 6 policy documents. LangChain/LlamaIndex would wrap a single prompt in abstractions; FAISS/Chroma and Pinecone are for corpora that don't fit in context. The spec lists them as optional; the engineering-judgment rubric favors the smallest thing that works. Reintroducing them later (if the knowledge base grows) is easy because the CAG/RAG swap is localized to `decision.py`.
+| | RAG (top-4 chunks) | CAG (all 6 docs) |
+|---|---|---|
+| Input tokens / request | ~1,060 | ~1,300 |
+| Cost / request | ~$0.00098 | ~$0.0011 |
 
-**8. Why `gemini-3-flash-preview`, and why the model is configurable?**
-`gemini-2.0-flash` (initially referenced) was **shut down by Google on June 1, 2026** — the code would 500 on every ticket. Current Flash-class models (`gemini-3-flash-preview`) give the best speed/cost for this structured, low-complexity task. The model is read from `GEMINI_MODEL` (default set in `.env.example`) so it can be changed without code edits. The Gemini call also uses `response_mime_type="application/json"` to force structured output, which is then still parsed and validated by `_parse_response` — never trusted blindly.
+A **~$0.00012/request** delta — noise at this scale. Cost was never the deciding factor; reliability and simplicity were.
 
-**9. Why is the LLM response validated instead of used as-is?**
-The model can return an off-list action, a confidence outside 0-1, or malformed JSON. `_parse_response` whitelists actions against `ALLOWED_ACTIONS`, clamps confidence, coerces `sources` to a list, and falls back to `NEEDS_MORE_INFORMATION` when parsing fails — so the API always stores a well-formed decision and never invents an answer on thin information (spec section 8).
+**4. CAG is not a trap at scale here.**
+The prompt is a fixed static prefix (policies + instructions) with only the ticket varying, so Gemini context caching would discount the bulk of the input cost if request volume grew — the extra cost shrinks, not grows.
 
-**10. Why do unit tests mock the LLM?**
-Tests must be fast, free, and deterministic. The tests monkeypatch `api.make_decision` with a fixed result, so pytest verifies our code (routes, DB, auth, authorization) without spending API tokens or depending on model output. Real-model accuracy is verified separately by `evaluate.py`, which calls Gemini against the official test cases.
+**5. The spec permits it explicitly.**
+The "only if it doesn't bloat the prompt context needlessly" condition is satisfied: 613 tokens is the opposite of bloat.
 
-**11. Why is `data/decisions.db` gitignored but schema committed?**
-The database is runtime state (users, tickets, decisions you create while testing). Committing it would bake in test data and stale credentials. The schema lives in code (`database.py` creates tables idempotently on startup), so any clone rebuilds a clean DB automatically. Same principle as `.env` versus `.env.example`.
+**6. The RAG path isn't lost.**
+`backend/retrieval.py` still contains the full local pipeline (header-based chunking, hashed word embeddings, NumPy cosine-similarity KNN over a SQLite `chunks` table). If the knowledge base ever outgrows the context window, swapping back is localized to `decision.load_knowledge_base()`. The current pipeline is:
 
-**12. Why does the frontend not need CORS handling on the backend?**
-Streamlit makes its HTTP calls **server-side** with Python's `requests` (not from the browser), so browser same-origin policy never applies — CORS is moot. (An early review flagged this as a possible issue; it was verified and dismissed.)
+```
+ticket + all policy docs → Gemini (forced JSON) → validate action/confidence/sources → persist
+```
