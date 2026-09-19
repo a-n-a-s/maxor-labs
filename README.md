@@ -95,7 +95,7 @@ Includes the required authorization test: Alice's token cannot retrieve Bob's ti
 
 ## Evaluation
 
-Run the AI against the 5 supplied test cases (calls the real Gemini API):
+Run the AI against the 5 supplied test cases (calls the real Gemini API — `--delay` spaces requests to stay within free-tier rate limits):
 
 ```powershell
 python evaluate.py
@@ -107,13 +107,18 @@ Optionally evaluate all 214 historical tickets:
 python evaluate.py --cases data/tickets.csv
 ```
 
-Example output:
+### Result (5/5 correct, verified live)
 
 ```
 5 test cases
-Correct: 4
-Incorrect: 1
-Accuracy: 80%
+Correct: 5
+Incorrect: 0
+Accuracy: 100%
+[PASS] S01: got=REQUEST_PHOTOS (100%) expected=REQUEST_PHOTOS
+[PASS] S02: got=APPROVE_RETURN (100%) expected=APPROVE_RETURN
+[PASS] S03: got=OPEN_SHIPPING_INVESTIGATION (100%) expected=OPEN_SHIPPING_INVESTIGATION
+[PASS] S04: got=REPLACE_CORRECT_ITEM (100%) expected=REPLACE_CORRECT_ITEM
+[PASS] S05: got=NEEDS_MORE_INFORMATION (100%) expected=NEEDS_MORE_INFORMATION
 ```
 
 ## RAG vs CAG — and why we chose CAG

@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend"))
 
@@ -34,8 +35,15 @@ def run_case(case: dict) -> dict:
     }
 
 
-def run_cases(cases: list[dict]) -> list[dict]:
-    return [run_case(c) for c in cases]
+def run_cases(cases: list[dict], delay: float = 0.0) -> list[dict]:
+    results = []
+    total = len(cases)
+    for i, c in enumerate(cases, start=1):
+        print(f"  [{i}/{total}] case {c.get('case_id', c.get('ticket_id', '?'))}...")
+        results.append(run_case(c))
+        if i < total and delay > 0:
+            time.sleep(delay)
+    return results
 
 
 def print_report(results: list[dict]) -> None:
@@ -83,13 +91,19 @@ def main() -> None:
         default="auto",
         help="Input format (default: auto-detect from file extension)",
     )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=8.0,
+        help="Seconds to wait between cases to avoid Gemini rate limits (default 8)",
+    )
     args = parser.parse_args()
 
     fmt = "csv" if args.format == "auto" and args.cases.endswith(".csv") else ("json" if args.format == "auto" else args.format)
     cases = load_cases(args.cases, fmt)
-    print(f"Evaluating {len(cases)} cases from {args.cases}...")
+    print(f"Evaluating {len(cases)} cases from {args.cases} (delay {args.delay}s between calls)...")
 
-    results = run_cases(cases)
+    results = run_cases(cases, delay=args.delay)
     print_report(results)
 
 
