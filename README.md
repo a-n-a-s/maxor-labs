@@ -35,6 +35,64 @@ intern-project/
 └── requirements.txt
 ```
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph FRONTEND["Frontend — Streamlit :8501"]
+        direction TB
+        F1["Login / Register"]
+        F2["New Decision"]
+        F3["History"]
+    end
+
+    subgraph API["Backend — FastAPI :8000"]
+        direction TB
+        A1["Auth<br/>POST /register · /login · /me<br/>JWT (HS256) + bcrypt"]
+        A2["Tickets<br/>POST /tickets · GET /tickets<br/>GET /tickets/{id}"]
+    end
+
+    subgraph ENGINE["Decision Engine"]
+        direction LR
+        E1["CAG<br/>all 6 policy docs · ~613 tokens<br/>static cached prefix"]
+        E2["Gemini<br/>gemini-3-flash-preview<br/>forced JSON output"]
+        E3["Validate<br/>action · confidence · sources"]
+    end
+
+    subgraph DB["SQLite — data/decisions.db"]
+        direction LR
+        D1["users"]
+        D2["tickets"]
+        D3["decisions"]
+    end
+
+    F1 -->|"POST /login → Bearer JWT"| A1
+    F2 -->|"POST /tickets · Bearer JWT"| A2
+    F3 -->|"GET /tickets · /tickets/{id}"| A2
+
+    A2 -->|"ticket + policies"| E1
+    E1 -->|"context"| E2
+    E2 -->|"raw output"| E3
+    E3 -->|"validated decision"| A2
+
+    A1 -->|"INSERT"| D1
+    A2 -->|"INSERT ticket"| D2
+    A2 -->|"INSERT decision (1:1)"| D3
+    A2 -.->|"SELECT own rows"| D2
+    A2 -.->|"SELECT decision"| D3
+
+    classDef fe fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef be fill:#e3f2fd,stroke:#1565c0,color:#0d47a1;
+    classDef ai fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c;
+    classDef db fill:#fff3e0,stroke:#e65100,color:#bf360c;
+    class F1,F2,F3 fe;
+    class A1,A2 be;
+    class E1,E2,E3 ai;
+    class D1,D2,D3 db;
+```
+
+The flow: **Streamlit → FastAPI (HTTP + JWT) → Gemini with CAG → validated decision → SQLite → back to History**.
+
 ## Setup
 
 1. **Clone / download** the repository.
